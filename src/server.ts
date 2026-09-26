@@ -10,6 +10,8 @@ import {
   tool
 } from "ai";
 import { z } from "zod";
+import { JARVIS_IDENTITY } from "./jarvis/identity";
+import { JARVIS_POLICIES } from "./jarvis/policies";
 
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
@@ -51,14 +53,19 @@ export class ChatAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.7-code", {
+      model: workersai("@cf/zai-org/glm-4.7-flash", {
         sessionAffinity: this.sessionAffinity
       }),
-      system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
+      system: `${JARVIS_IDENTITY}
+
+${JARVIS_POLICIES}
+
+You can understand images. When users share images, describe what you see and answer questions about them.
 
 ${getSchedulePrompt({ date: new Date() })}
 
 If the user asks to schedule a task, use the schedule tool to schedule the task.`,
+
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
