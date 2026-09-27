@@ -1,4 +1,4 @@
-import { createWorkersAI } from "workers-ai-provider";
+import { getJarvisModel } from "./jarvis/models";
 import {
   callable,
   routeAgentRequest,
@@ -304,7 +304,6 @@ export class ChatAgent extends AIChatAgent<Env> {
         }
       ])
     );
-    const workersai = createWorkersAI({ binding: this.env.AI });
 
     const messages = await convertToModelMessages(this.messages);
 
@@ -321,9 +320,7 @@ export class ChatAgent extends AIChatAgent<Env> {
       memoryQuery.length > 3 ? searchMemories(this, memoryQuery) : [];
 
     const result = streamText({
-      model: workersai("@cf/zai-org/glm-4.7-flash", {
-        sessionAffinity: this.sessionAffinity
-      }),
+      model: getJarvisModel(this.env, "default", this.sessionAffinity),
       system: `${JARVIS_IDENTITY}
 
 ${JARVIS_POLICIES}
