@@ -2,31 +2,48 @@ import { createWorkersAI } from "workers-ai-provider";
 
 export type JarvisModelProvider = "workers-ai";
 
-export type JarvisModelRole = "fast" | "default" | "reasoning";
+export type JarvisModelRole =
+  | "fast"
+  | "default"
+  | "reasoning"
+  | "coding"
+  | "vision";
 
 export interface JarvisModelConfig {
   provider: JarvisModelProvider;
   model: string;
-  temperature?: number;
+  description: string;
 }
 
 const MODEL_CONFIG: Record<JarvisModelRole, JarvisModelConfig> = {
   fast: {
     provider: "workers-ai",
     model: "@cf/zai-org/glm-4.7-flash",
-    temperature: 0.2
+    description: "Efficient model for simple requests and tool usage"
   },
 
   default: {
     provider: "workers-ai",
-    model: "@cf/zai-org/glm-4.7-flash",
-    temperature: 0.4
+    model: "@cf/google/gemma-4-26b-a4b-it",
+    description: "General-purpose model for normal JARVIS requests"
   },
 
   reasoning: {
     provider: "workers-ai",
-    model: "@cf/zai-org/glm-4.7-flash",
-    temperature: 0.2
+    model: "@cf/nvidia/nemotron-3-120b-a12b",
+    description: "Reasoning model for complex tasks"
+  },
+
+  coding: {
+    provider: "workers-ai",
+    model: "@cf/openai/gpt-oss-20b",
+    description: "Model for coding and technical tasks"
+  },
+
+  vision: {
+    provider: "workers-ai",
+    model: "@cf/google/gemma-4-26b-a4b-it",
+    description: "Model for image and multimodal requests"
   }
 };
 
@@ -66,17 +83,6 @@ export function getJarvisModel(
   }
 }
 
-export function getJarvisModelWithFallback(
-  env: Env,
-  primaryRole: JarvisModelRole = "default",
-  fallbackRole: JarvisModelRole = "fast",
-  sessionAffinity?: string
-) {
-  try {
-    return getJarvisModel(env, primaryRole, sessionAffinity);
-  } catch (error) {
-    console.error("[JARVIS Model Router] Primary model failed:", error);
-
-    return getJarvisModel(env, fallbackRole, sessionAffinity);
-  }
+export function listJarvisModels(): Record<JarvisModelRole, JarvisModelConfig> {
+  return MODEL_CONFIG;
 }
