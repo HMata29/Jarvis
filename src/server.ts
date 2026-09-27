@@ -25,6 +25,17 @@ import {
   updateMemory
 } from "./jarvis/memory";
 import { requiresConfirmation } from "./jarvis/permissions";
+import {
+  createGoogleCalendarAuthorizationUrl,
+  getCalendarRedirectUri,
+  handleGoogleCalendarCallback,
+  listCalendarEvents,
+  getCalendarEvent,
+  createCalendarEvent,
+  updateCalendarEvent,
+  deleteCalendarEvent,
+  listGoogleCalendars
+} from "./jarvis/calendar";
 
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
@@ -224,6 +235,38 @@ export class ChatAgent extends AIChatAgent<Env> {
     return await this.ctx.storage.get<string>(`mcp-oauth-url:${serverId}`);
   }
 
+  @callable()
+  async getGoogleCalendarAuthUrl() {
+    const env = this.env as Env & {
+      MCP_CLIENT_ID: string;
+      MCP_CLIENT_SECRET: string;
+    };
+
+    const redirectUri = getCalendarRedirectUri();
+
+    return await createGoogleCalendarAuthorizationUrl(
+      this.ctx.storage,
+      env,
+      redirectUri
+    );
+  }
+
+  async handleGoogleCalendarCallback(request: Request) {
+    const env = this.env as Env & {
+      MCP_CLIENT_ID: string;
+      MCP_CLIENT_SECRET: string;
+    };
+
+    const redirectUri = getCalendarRedirectUri();
+
+    return await handleGoogleCalendarCallback(
+      request,
+      this.ctx.storage,
+      env,
+      redirectUri
+    );
+  }
+
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const rawMcpTools = this.mcp.getAITools();
 
@@ -308,6 +351,14 @@ Current default permissions:
 Never bypass a required confirmation.
 Never claim an action was performed before the corresponding tool succeeds.
 
+CALENDAR DATE RULES:
+
+- When presenting a calendar event, use the event's actual ISO date/time returned by the calendar tool.
+- Never guess or infer the weekday independently.
+- The weekday must correspond exactly to the event's date in its specified timezone.
+- For example, 2026-09-28 is Monday, not Friday.
+- If there is any uncertainty about the weekday, omit the weekday rather than inventing one.
+
 You can understand images. You can check the weather, get the user's timezone,
 run calculations, manage persistent memory, and schedule tasks.
 
@@ -328,19 +379,18 @@ MEMORY RULES:
 - Never claim that something is stored in long-term memory unless a memory tool actually returns it.
 - Never use information from the current conversation as evidence that something is stored in long-term memory.
 
-${
-  relevantMemories.length > 0
-    ? `
+${relevantMemories.length > 0
+          ? `
 RELEVANT PERSISTENT MEMORIES:
 
 ${relevantMemories
-  .map((memory) => `- [${memory.category}] ${memory.content}`)
-  .join("\n")}
+            .map((memory) => `- [${memory.category}] ${memory.content}`)
+            .join("\n")}
 
 Use these memories only when they are relevant to the user's request.
 `
-    : ""
-}`,
+          : ""
+        }`,
 
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
@@ -351,6 +401,198 @@ Use these memories only when they are relevant to the user's request.
       tools: {
         // MCP tools from connected servers
         ...mcpTools,
+
+        getCalendarEvent: tool({
+          description: "Get a specific Google Calendar event by its event ID.",
+          inputSchema: z.object({
+            eventId: z.string().describe("Google Calendar event ID")
+          }),
+          execute: async ({ eventId }) => {
+            return getCalendarEvent(
+              this.ctx.storage,
+              this.env as Env & {
+                MCP_CLIENT_ID: string;
+                MCP_CLIENT_SECRET: string;
+              },
+              eventId
+            );
+          }
+        }),
+
+        listGoogleCalendars: tool({
+          description: "List the Google Calendars accessible to the user.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            return listGoogleCalendars(
+              this.ctx.storage,
+              this.env as Env & {
+                MCP_CLIENT_ID: string;
+                MCP_CLIENT_SECRET: string;
+              }
+            );
+          }
+        }),
+
+        listCalendarEvents: tool({
+          description:
+            "List the user's Google Calendar events within a specified time range.",
+          inputSchema: z.object({
+            startTime: z
+              .string()
+              .describe("Start of the time range in ISO 8601 format"),
+            endTime: z
+              .string()
+              .describe("End of the time range in ISO 8601 format"),
+            timeZone: z
+              .string()
+              .default("Europe/Rome")
+              .describe("IANA timezone, for example Europe/Rome")
+          }),
+          execute: async ({ startTime, endTime, timeZone }) => {
+            return listCalendarEvents(
+              this.ctx.storage,
+              this.env as Env & {
+                MCP_CLIENT_ID: string;
+                MCP_CLIENT_SECRET: string;
+              },
+              startTime,
+              endTime,
+              timeZone
+            );
+          }
+        }),
+
+        createCalendarEvent: tool({
+          description: "Create an event in the user's primary Google Calendar.",
+          inputSchema: z.object({
+            summary: z.string().describe("Event title"),
+            description: z.string().optional().describe("Event description"),
+            location: z.string().optional().describe("Event location"),
+            startTime: z.string().describe("Start time in ISO 8601 format"),
+            endTime: z.string().describe("End time in ISO 8601 format"),
+            timeZone: z
+              .string()
+              .default("Europe/Rome")
+              .describe("IANA timezone, for example Europe/Rome")
+          }),
+          needsApproval: async () =>
+            requiresConfirmation("create_calendar_event"),
+          execute: async ({
+            summary,
+            description,
+            location,
+            startTime,
+            endTime,
+            timeZone
+          }) => {
+            return createCalendarEvent(
+              this.ctx.storage,
+              this.env as Env & {
+                MCP_CLIENT_ID: string;
+                MCP_CLIENT_SECRET: string;
+              },
+              {
+                summary,
+                description,
+                location,
+                start: {
+                  dateTime: startTime,
+                  timeZone
+                },
+                end: {
+                  dateTime: endTime,
+                  timeZone
+                }
+              }
+            );
+          }
+        }),
+
+        updateCalendarEvent: tool({
+          description:
+            "Update an existing event in the user's primary Google Calendar.",
+          inputSchema: z.object({
+            eventId: z.string().describe("Google Calendar event ID"),
+            summary: z.string().optional().describe("New event title"),
+            description: z
+              .string()
+              .optional()
+              .describe("New event description"),
+            location: z.string().optional().describe("New event location"),
+            startTime: z
+              .string()
+              .optional()
+              .describe("New start time in ISO 8601 format"),
+            endTime: z
+              .string()
+              .optional()
+              .describe("New end time in ISO 8601 format"),
+            timeZone: z
+              .string()
+              .default("Europe/Rome")
+              .describe("IANA timezone, for example Europe/Rome")
+          }),
+          needsApproval: async () =>
+            requiresConfirmation("create_calendar_event"),
+          execute: async ({
+            eventId,
+            summary,
+            description,
+            location,
+            startTime,
+            endTime,
+            timeZone
+          }) => {
+            return updateCalendarEvent(
+              this.ctx.storage,
+              this.env as Env & {
+                MCP_CLIENT_ID: string;
+                MCP_CLIENT_SECRET: string;
+              },
+              eventId,
+              {
+                summary,
+                description,
+                location,
+                ...(startTime
+                  ? {
+                    start: {
+                      dateTime: startTime,
+                      timeZone
+                    }
+                  }
+                  : {}),
+                ...(endTime
+                  ? {
+                    end: {
+                      dateTime: endTime,
+                      timeZone
+                    }
+                  }
+                  : {})
+              }
+            );
+          }
+        }),
+
+        deleteCalendarEvent: tool({
+          description:
+            "Delete an event from the user's primary Google Calendar.",
+          inputSchema: z.object({
+            eventId: z.string().describe("Google Calendar event ID")
+          }),
+          needsApproval: async () => true,
+          execute: async ({ eventId }) => {
+            return deleteCalendarEvent(
+              this.ctx.storage,
+              this.env as Env & {
+                MCP_CLIENT_ID: string;
+                MCP_CLIENT_SECRET: string;
+              },
+              eventId
+            );
+          }
+        }),
 
         rememberMemory: tool({
           description:
@@ -563,6 +805,15 @@ Use these memories only when they are relevant to the user's request.
 
 export default {
   async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/google-calendar/callback") {
+      const id = env.ChatAgent.idFromName("default");
+      const stub = env.ChatAgent.get(id);
+
+      return await stub.handleGoogleCalendarCallback(request);
+    }
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })

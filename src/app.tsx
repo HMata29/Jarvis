@@ -281,6 +281,7 @@ function Chat() {
   const [isAddingServer, setIsAddingServer] = useState(false);
   const mcpPanelRef = useRef<HTMLDivElement>(null);
   const handledMcpAuthServers = useRef(new Set<string>());
+  const [isConnectingCalendar, setIsConnectingCalendar] = useState(false);
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
@@ -355,6 +356,28 @@ function Chat() {
       await agent.stub.removeServer(serverId);
     } catch (e) {
       console.error("Failed to remove MCP server:", e);
+    }
+  };
+
+  const handleConnectGoogleCalendar = async () => {
+    setIsConnectingCalendar(true);
+
+    try {
+      const authUrl = await agent.stub.getGoogleCalendarAuthUrl();
+
+      console.log("[Google Calendar] OAuth:", {
+        clientId: new URL(authUrl).searchParams.get("client_id"),
+        redirectUri: new URL(authUrl).searchParams.get("redirect_uri")
+      });
+
+      window.open(authUrl, "google-calendar-oauth", "width=600,height=800");
+    } catch (error) {
+      console.error(
+        "[Google Calendar] Failed to get authorization URL:",
+        error
+      );
+    } finally {
+      setIsConnectingCalendar(false);
     }
   };
 
@@ -587,6 +610,23 @@ function Chat() {
               {showMcpPanel && (
                 <div className="absolute right-0 top-full mt-2 w-96 z-50">
                   <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-4">
+                    <div className="space-y-2">
+                      <Text size="sm" bold>
+                        Google Calendar
+                      </Text>
+
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={<SignInIcon size={14} />}
+                        onClick={handleConnectGoogleCalendar}
+                        disabled={isConnectingCalendar}
+                      >
+                        {isConnectingCalendar
+                          ? "Connecting..."
+                          : "Connect Google Calendar"}
+                      </Button>
+                    </div>
                     {/* Panel Header */}
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
