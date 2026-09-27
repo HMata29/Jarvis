@@ -1,5 +1,10 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { callable, routeAgentRequest, type Schedule } from "agents";
+import {
+  callable,
+  routeAgentRequest,
+  type Schedule,
+  DurableObjectOAuthClientProvider
+} from "agents";
 import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
@@ -12,27 +17,175 @@ import {
 import { z } from "zod";
 import { JARVIS_IDENTITY } from "./jarvis/identity";
 import { JARVIS_POLICIES } from "./jarvis/policies";
+import {
+  rememberMemory,
+  listMemories,
+  searchMemories,
+  forgetMemory,
+  updateMemory
+} from "./jarvis/memory";
+import { requiresConfirmation } from "./jarvis/permissions";
 
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
-  chatRecovery = true;
   // Wait for MCP connections to be re-established after hibernation before
   // processing a message, so MCP tools aren't intermittently missing.
   waitForMcpConnections = true;
+
+  createMcpOAuthProvider(callbackUrl: string) {
+    const env = this.env as Env & {
+      MCP_CLIENT_ID: string;
+      MCP_CLIENT_SECRET: string;
+    };
+
+    const storage = this.ctx.storage;
+
+    const providerInstanceId = crypto.randomUUID();
+
+    console.log("[MCP OAuth] PROVIDER CREATED", {
+      providerInstanceId,
+      serverId: this.name
+    });
+
+    return new (class extends DurableObjectOAuthClientProvider {
+      async clientInformation(context?: { issuer: string }) {
+        console.log("[MCP OAuth] CLIENT INFORMATION", {
+          providerInstanceId,
+          serverId: this.serverId,
+          issuer: context?.issuer
+        });
+
+        this.clientId = env.MCP_CLIENT_ID;
+
+        return {
+          client_id: env.MCP_CLIENT_ID,
+          client_secret: env.MCP_CLIENT_SECRET,
+          redirect_uris: [callbackUrl],
+          issuer: context?.issuer
+        };
+      }
+
+      async tokens(context?: { issuer: string }) {
+        const tokens = await super.tokens(context);
+
+        console.log("[MCP OAuth] TOKENS", {
+          providerInstanceId,
+          serverId: this.serverId,
+          clientId: this.clientId,
+          hasAccessToken: Boolean(tokens?.access_token),
+          hasRefreshToken: Boolean(tokens?.refresh_token),
+          issuer: tokens?.issuer,
+          contextIssuer: context?.issuer
+        });
+
+        return tokens;
+      }
+
+      async saveTokens(
+        tokens: Parameters<DurableObjectOAuthClientProvider["saveTokens"]>[0],
+        context?: { issuer: string }
+      ) {
+        console.log("[MCP OAuth] >>> SAVE TOKENS CALLED <<<", {
+          providerInstanceId,
+          serverId: this.serverId,
+          hasAccessToken: Boolean(tokens.access_token),
+          hasRefreshToken: Boolean(tokens.refresh_token),
+          tokenType: tokens.token_type,
+          scope: tokens.scope,
+          expiresIn: tokens.expires_in,
+          issuer: context?.issuer
+        });
+
+        try {
+          const result = await super.saveTokens(tokens, context);
+
+          console.log("[MCP OAuth] >>> SAVE TOKENS SUCCESS <<<", {
+            providerInstanceId,
+            serverId: this.serverId
+          });
+
+          return result;
+        } catch (error) {
+          console.error("[MCP OAuth] >>> SAVE TOKENS FAILED <<<", {
+            providerInstanceId,
+            serverId: this.serverId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+
+          throw error;
+        }
+      }
+
+      async redirectToAuthorization(authorizationUrl: URL) {
+        const authUrl = authorizationUrl.toString();
+
+        console.log("[MCP OAuth] REDIRECT TO AUTHORIZATION", {
+          providerInstanceId,
+          serverId: this.serverId,
+          authUrl
+        });
+
+        await storage.put(`mcp-oauth-url:${this.serverId}`, authUrl);
+
+        console.log("[MCP OAuth] AUTH URL SAVED", {
+          providerInstanceId,
+          serverId: this.serverId
+        });
+
+        return super.redirectToAuthorization(authorizationUrl);
+      }
+
+      get authUrl() {
+        const url = super.authUrl;
+
+        console.log("[MCP OAuth] authUrl getter", {
+          providerInstanceId,
+          serverId: this.serverId,
+          hasAuthUrl: Boolean(url)
+        });
+
+        return url;
+      }
+
+      get clientMetadata() {
+        return {
+          client_id: env.MCP_CLIENT_ID,
+          client_secret: env.MCP_CLIENT_SECRET,
+          redirect_uris: [callbackUrl]
+        };
+      }
+
+      async saveCodeVerifier(codeVerifier: string) {
+        console.log("[MCP OAuth] SAVE CODE VERIFIER", {
+          providerInstanceId,
+          serverId: this.serverId,
+          hasCodeVerifier: Boolean(codeVerifier)
+        });
+
+        return super.saveCodeVerifier(codeVerifier);
+      }
+    })(this.ctx.storage, this.name, callbackUrl);
+  }
 
   onStart() {
     // Configure OAuth popup behavior for MCP servers that require authentication
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
+        console.log("[MCP OAuth CALLBACK RESULT]", JSON.stringify(result));
+
         if (result.authSuccess) {
           return new Response("<script>window.close();</script>", {
             headers: { "content-type": "text/html" },
             status: 200
           });
         }
+
         return new Response(
           `Authentication Failed: ${result.authError || "Unknown error"}`,
-          { headers: { "content-type": "text/plain" }, status: 400 }
+          {
+            headers: { "content-type": "text/plain" },
+            status: 400
+          }
         );
       }
     });
@@ -48,9 +201,81 @@ export class ChatAgent extends AIChatAgent<Env> {
     await this.removeMcpServer(serverId);
   }
 
+  @callable()
+  async resetMcpOAuth(serverId: string) {
+    const prefix = `/${this.name}/${serverId}/`;
+
+    const entries = await this.ctx.storage.list({ prefix });
+    const keys = [...entries.keys()];
+
+    if (keys.length > 0) {
+      await this.ctx.storage.delete(keys);
+    }
+
+    console.log(
+      `[MCP] OAuth reset for ${serverId}: deleted ${keys.length} stored keys`
+    );
+
+    return `MCP OAuth credentials reset (${keys.length} keys deleted)`;
+  }
+
+  @callable()
+  async getPendingMcpAuthUrl(serverId: string) {
+    return await this.ctx.storage.get<string>(`mcp-oauth-url:${serverId}`);
+  }
+
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
-    const mcpTools = this.mcp.getAITools();
+    const rawMcpTools = this.mcp.getAITools();
+
+    const mcpTools = Object.fromEntries(
+      Object.entries(rawMcpTools).map(([name, mcpTool]) => [
+        name,
+        {
+          ...mcpTool,
+          execute: async (args: Record<string, unknown>, options?: unknown) => {
+            console.log(`[MCP] Calling ${name}`, JSON.stringify(args));
+
+            try {
+              const result = await mcpTool.execute(args, options);
+              console.log(`[MCP] ${name} result`, JSON.stringify(result));
+              return result;
+            } catch (error) {
+              console.error(`[MCP] ${name} ERROR`, error);
+
+              const errorText =
+                error instanceof Error ? error.message : String(error);
+              const isUnauthorized =
+                errorText.includes("Unauthorized") ||
+                errorText.includes("401") ||
+                errorText.includes(
+                  "Authentication requires user authorization"
+                );
+
+              if (isUnauthorized) {
+                console.log(`[MCP OAuth] Unauthorized detected for ${name}.`);
+              }
+
+              throw error;
+            }
+          }
+        }
+      ])
+    );
     const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const messages = await convertToModelMessages(this.messages);
+
+    const lastUserMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === "user");
+
+    const memoryQuery =
+      typeof lastUserMessage?.content === "string"
+        ? lastUserMessage.content.trim()
+        : "";
+
+    const relevantMemories =
+      memoryQuery.length > 3 ? searchMemories(this, memoryQuery) : [];
 
     const result = streamText({
       model: workersai("@cf/zai-org/glm-4.7-flash", {
@@ -60,21 +285,98 @@ export class ChatAgent extends AIChatAgent<Env> {
 
 ${JARVIS_POLICIES}
 
-You can understand images. When users share images, describe what you see and answer questions about them.
+PERMISSION RULES:
+
+JARVIS has a permission system for actions.
+
+- "auto": JARVIS may perform the action without asking for confirmation.
+- "configurable": the action depends on the user's configured permission.
+- "confirm": JARVIS must ask the user for confirmation before performing the action.
+
+Current default permissions:
+
+- read_calendar: auto
+- search_web: auto
+- check_weather: auto
+- create_reminder: auto
+- create_calendar_event: configurable
+- send_email: confirm
+- delete_email: confirm
+- financial_action: confirm
+- browser_action: configurable
+
+Never bypass a required confirmation.
+Never claim an action was performed before the corresponding tool succeeds.
+
+You can understand images. You can check the weather, get the user's timezone,
+run calculations, manage persistent memory, and schedule tasks.
 
 ${getSchedulePrompt({ date: new Date() })}
 
-If the user asks to schedule a task, use the schedule tool to schedule the task.`,
+When the user asks to schedule a task, use the schedule tool.
+
+MEMORY RULES:
+
+- Do not treat the current conversation as long-term memory.
+- When the user explicitly asks you to remember something, use rememberMemory.
+- When the user asks what you remember about them in general, use listMemories.
+- When the user asks whether you remember a specific fact, use searchMemory.
+- When the user asks for specific information that may be stored in memory, use searchMemory.
+- When the user asks you to forget something, use forgetMemory.
+- When the user asks to change a stored memory, use updateMemory.
+- Only information returned by the memory tools counts as persistent memory.
+- Never claim that something is stored in long-term memory unless a memory tool actually returns it.
+- Never use information from the current conversation as evidence that something is stored in long-term memory.
+
+${
+  relevantMemories.length > 0
+    ? `
+RELEVANT PERSISTENT MEMORIES:
+
+${relevantMemories
+  .map((memory) => `- [${memory.category}] ${memory.content}`)
+  .join("\n")}
+
+Use these memories only when they are relevant to the user's request.
+`
+    : ""
+}`,
 
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages),
+        messages,
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
       tools: {
         // MCP tools from connected servers
         ...mcpTools,
+
+        rememberMemory: tool({
+          description:
+            "Save a piece of information to JARVIS long-term memory. Use only when the user explicitly asks JARVIS to remember something.",
+          inputSchema: z.object({
+            content: z.string().describe("The information to remember"),
+            category: z
+              .string()
+              .default("general")
+              .describe(
+                "Memory category, such as personal, preference, project, work, or general"
+              )
+          }),
+          execute: async ({ content, category }) => {
+            return rememberMemory(this, content, category);
+          }
+        }),
+
+        listMemories: tool({
+          description:
+            "List all long-term memories explicitly saved by the user.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            return listMemories(this);
+          }
+        }),
 
         // Server-side tool: runs automatically on the server
         getWeather: tool({
@@ -106,7 +408,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         // Approval tool: requires user confirmation before executing
         calculate: tool({
           description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
+            "Perform a mathematical calculation with two numbers. Use this tool directly for normal calculations. The system will automatically request user approval when required. Do not ask for approval yourself.",
           inputSchema: z.object({
             a: z.number().describe("First number"),
             b: z.number().describe("Second number"),
@@ -115,7 +417,9 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
               .describe("Arithmetic operator")
           }),
           needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
+            requiresConfirmation("calculate") ||
+            Math.abs(a) > 1000 ||
+            Math.abs(b) > 1000,
           execute: async ({ a, b, operator }) => {
             const ops: Record<string, (x: number, y: number) => number> = {
               "+": (x, y) => x + y,
@@ -131,6 +435,52 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
               expression: `${a} ${operator} ${b}`,
               result: ops[operator](a, b)
             };
+          }
+        }),
+
+        searchMemory: tool({
+          description:
+            "Search JARVIS's persistent memory for information relevant to the user's request.",
+          inputSchema: z.object({
+            query: z
+              .string()
+              .describe("What information to search for in memory")
+          }),
+          execute: async ({ query }) => {
+            return searchMemories(this, query);
+          }
+        }),
+
+        forgetMemory: tool({
+          description: "Delete a specific long-term memory from JARVIS.",
+          inputSchema: z.object({
+            id: z.string().describe("The ID of the memory to delete")
+          }),
+          execute: async ({ id }) => {
+            const deleted = forgetMemory(this, id);
+
+            return deleted
+              ? `Memory ${id} deleted successfully.`
+              : `Memory ${id} was not found.`;
+          }
+        }),
+
+        updateMemory: tool({
+          description: "Update an existing long-term memory.",
+          inputSchema: z.object({
+            id: z.string().describe("The ID of the memory to update"),
+            content: z.string().describe("The new memory content"),
+            category: z
+              .string()
+              .optional()
+              .describe("Optional new memory category")
+          }),
+          execute: async ({ id, content, category }) => {
+            const updated = updateMemory(this, id, content, category);
+
+            return updated
+              ? `Memory ${id} updated successfully.`
+              : `Memory ${id} was not found.`;
           }
         }),
 

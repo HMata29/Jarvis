@@ -280,6 +280,7 @@ function Chat() {
   const [mcpUrl, setMcpUrl] = useState("");
   const [isAddingServer, setIsAddingServer] = useState(false);
   const mcpPanelRef = useRef<HTMLDivElement>(null);
+  const handledMcpAuthServers = useRef(new Set<string>());
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
@@ -328,9 +329,18 @@ function Chat() {
 
   const handleAddServer = async () => {
     if (!mcpName.trim() || !mcpUrl.trim()) return;
+
     setIsAddingServer(true);
+
     try {
-      await agent.stub.addServer(mcpName.trim(), mcpUrl.trim());
+      const result = await agent.stub.addServer(mcpName.trim(), mcpUrl.trim());
+
+      console.log("[MCP] Add server result:", result);
+
+      if (result?.authUrl) {
+        window.open(result.authUrl, "oauth", "width=600,height=800");
+      }
+
       setMcpName("");
       setMcpUrl("");
     } catch (e) {
@@ -379,6 +389,48 @@ function Chat() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    console.log("[MCP AUTH] messages changed", messages.length);
+    for (const message of messages) {
+      if (message.role !== "assistant") continue;
+
+      for (const part of message.parts) {
+        if (!isToolUIPart(part) || part.state !== "output-error") {
+          continue;
+        }
+
+        const toolName = getToolName(part);
+
+        if (!toolName.startsWith("tool_")) continue;
+
+        const match = toolName.match(/^tool_([^_]+)_/);
+        if (!match) continue;
+
+        const serverId = match[1];
+
+        if (handledMcpAuthServers.current.has(serverId)) {
+          continue;
+        }
+
+        handledMcpAuthServers.current.add(serverId);
+
+        void (async () => {
+          try {
+            const authUrl = await agent.stub.getPendingMcpAuthUrl(serverId);
+
+            console.log("[MCP] Pending OAuth URL:", authUrl);
+
+            if (authUrl) {
+              window.open(authUrl, "oauth", "width=600,height=800");
+            }
+          } catch (error) {
+            console.error("[MCP] Failed to get pending OAuth URL:", error);
+          }
+        })();
+      }
+    }
+  }, [messages, agent]);
 
   // Re-focus the input after streaming ends
   useEffect(() => {
