@@ -12,7 +12,10 @@ export type PermissionAction =
   | "delete_email"
   | "financial_action"
   | "browser_action"
-  | "calculate";
+  | "calculate"
+  | "send_email"
+  | "trash_email"
+  | "modify_email";
 
 export interface PermissionRule {
   action: PermissionAction;
@@ -91,6 +94,18 @@ const DEFAULT_PERMISSIONS: Record<PermissionAction, PermissionRule> = {
     action: "calculate",
     level: "auto",
     description: "Perform a mathematical calculation"
+  },
+
+  trash_email: {
+    action: "trash_email",
+    level: "confirm",
+    description: "Move an email to the Gmail trash"
+  },
+
+  modify_email: {
+    action: "modify_email",
+    level: "configurable",
+    description: "Modify email state, labels, or read status"
   }
 };
 

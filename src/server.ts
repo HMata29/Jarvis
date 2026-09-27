@@ -37,6 +37,24 @@ import {
   listGoogleCalendars
 } from "./jarvis/calendar";
 
+import {
+  createGoogleGmailAuthorizationUrl,
+  handleGoogleGmailCallback,
+  getGmailRedirectUri,
+  getGmailProfile,
+  searchGmailMessages,
+  getGmailMessage,
+  getGmailThread,
+  createGmailDraft,
+  updateGmailDraft,
+  deleteGmailDraft,
+  sendGmailMessage,
+  sendGmailDraft,
+  trashGmailMessage,
+  modifyGmailLabels,
+  listGmailLabels
+} from "./jarvis/gmail";
+
 export class ChatAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 100;
   // Wait for MCP connections to be re-established after hibernation before
@@ -236,6 +254,34 @@ export class ChatAgent extends AIChatAgent<Env> {
   }
 
   @callable()
+  async getGoogleGmailAuthUrl() {
+    const env = this.env as Env & {
+      MCP_CLIENT_ID: string;
+      MCP_CLIENT_SECRET: string;
+    };
+
+    return await createGoogleGmailAuthorizationUrl(
+      this.ctx.storage,
+      env,
+      getGmailRedirectUri()
+    );
+  }
+
+  async handleGoogleGmailCallback(request: Request) {
+    const env = this.env as Env & {
+      MCP_CLIENT_ID: string;
+      MCP_CLIENT_SECRET: string;
+    };
+
+    return await handleGoogleGmailCallback(
+      request,
+      this.ctx.storage,
+      env,
+      getGmailRedirectUri()
+    );
+  }
+
+  @callable()
   async getGoogleCalendarAuthUrl() {
     const env = this.env as Env & {
       MCP_CLIENT_ID: string;
@@ -356,6 +402,19 @@ CALENDAR DATE RULES:
 - For example, 2026-09-28 is Monday, not Friday.
 - If there is any uncertainty about the weekday, omit the weekday rather than inventing one.
 
+EMAIL RULES:
+
+- Reading and searching Gmail is automatic.
+- Creating a draft is automatic.
+- Updating a draft is automatic.
+- Sending an email always requires user confirmation.
+- Sending an existing draft always requires user confirmation.
+- Moving an email to Trash always requires user confirmation.
+- Marking an email read or unread requires confirmation.
+- Changing Gmail labels requires confirmation.
+- Never permanently delete Gmail messages.
+Never claim that an email was sent, moved to trash, or modified until the corresponding Gmail tool succeeds.
+
 You can understand images. You can check the weather, get the user's timezone,
 run calculations, manage persistent memory, and schedule tasks.
 
@@ -413,6 +472,275 @@ Use these memories only when they are relevant to the user's request.
                 MCP_CLIENT_SECRET: string;
               },
               eventId
+            );
+          }
+        }),
+
+        getGmailProfile: tool({
+          description: "Get the authenticated Gmail account profile.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return getGmailProfile(this.ctx.storage, env);
+          }
+        }),
+
+        searchGmail: tool({
+          description:
+            "Search Gmail messages using Gmail search syntax. Examples: from:example@gmail.com, is:unread, newer_than:7d, subject:invoice.",
+          inputSchema: z.object({
+            query: z.string().describe("Gmail search query"),
+            maxResults: z
+              .number()
+              .int()
+              .min(1)
+              .max(50)
+              .optional()
+              .describe("Maximum number of results")
+          }),
+          execute: async ({ query, maxResults }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return searchGmailMessages(
+              this.ctx.storage,
+              env,
+              query,
+              maxResults
+            );
+          }
+        }),
+
+        getGmailMessage: tool({
+          description:
+            "Read the complete content and metadata of a Gmail message.",
+          inputSchema: z.object({
+            messageId: z.string()
+          }),
+          execute: async ({ messageId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return getGmailMessage(this.ctx.storage, env, messageId);
+          }
+        }),
+
+        getGmailThread: tool({
+          description: "Read all messages in a Gmail conversation thread.",
+          inputSchema: z.object({
+            threadId: z.string()
+          }),
+          execute: async ({ threadId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return getGmailThread(this.ctx.storage, env, threadId);
+          }
+        }),
+
+        createGmailDraft: tool({
+          description: "Create a Gmail draft without sending it.",
+          inputSchema: z.object({
+            to: z.string(),
+            cc: z.string().optional(),
+            bcc: z.string().optional(),
+            subject: z.string(),
+            body: z.string(),
+            inReplyTo: z.string().optional(),
+            references: z.string().optional()
+          }),
+          execute: async (input) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return createGmailDraft(this.ctx.storage, env, input);
+          }
+        }),
+
+        updateGmailDraft: tool({
+          description: "Replace the content of an existing Gmail draft.",
+          inputSchema: z.object({
+            draftId: z.string(),
+            to: z.string(),
+            cc: z.string().optional(),
+            bcc: z.string().optional(),
+            subject: z.string(),
+            body: z.string(),
+            inReplyTo: z.string().optional(),
+            references: z.string().optional()
+          }),
+          execute: async ({ draftId, ...input }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return updateGmailDraft(this.ctx.storage, env, draftId, input);
+          }
+        }),
+
+        deleteGmailDraft: tool({
+          description: "Permanently delete an unsent Gmail draft.",
+          needsApproval: async () => requiresConfirmation("trash_email"),
+          inputSchema: z.object({
+            draftId: z.string()
+          }),
+          execute: async ({ draftId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return deleteGmailDraft(this.ctx.storage, env, draftId);
+          }
+        }),
+
+        sendGmail: tool({
+          description:
+            "Send an email through Gmail. ALWAYS requires user confirmation.",
+          needsApproval: async () => requiresConfirmation("send_email"),
+          inputSchema: z.object({
+            to: z.string(),
+            cc: z.string().optional(),
+            bcc: z.string().optional(),
+            subject: z.string(),
+            body: z.string(),
+            inReplyTo: z.string().optional(),
+            references: z.string().optional()
+          }),
+          execute: async (input) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return sendGmailMessage(this.ctx.storage, env, input);
+          }
+        }),
+
+        sendGmailDraft: tool({
+          description:
+            "Send an existing Gmail draft. ALWAYS requires user confirmation.",
+          needsApproval: async () => requiresConfirmation("send_email"),
+          inputSchema: z.object({
+            draftId: z.string()
+          }),
+          execute: async ({ draftId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return sendGmailDraft(this.ctx.storage, env, draftId);
+          }
+        }),
+
+        trashGmailMessage: tool({
+          description:
+            "Move a Gmail message to the trash. ALWAYS requires user confirmation.",
+          needsApproval: async () => requiresConfirmation("trash_email"),
+          inputSchema: z.object({
+            messageId: z.string()
+          }),
+          execute: async ({ messageId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return trashGmailMessage(this.ctx.storage, env, messageId);
+          }
+        }),
+
+        markGmailRead: tool({
+          description: "Mark a Gmail message as read.",
+          needsApproval: async () => requiresConfirmation("modify_email"),
+          inputSchema: z.object({
+            messageId: z.string()
+          }),
+          execute: async ({ messageId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return modifyGmailLabels(
+              this.ctx.storage,
+              env,
+              messageId,
+              [],
+              ["UNREAD"]
+            );
+          }
+        }),
+
+        markGmailUnread: tool({
+          description: "Mark a Gmail message as unread.",
+          needsApproval: async () => requiresConfirmation("modify_email"),
+          inputSchema: z.object({
+            messageId: z.string()
+          }),
+          execute: async ({ messageId }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return modifyGmailLabels(
+              this.ctx.storage,
+              env,
+              messageId,
+              ["UNREAD"],
+              []
+            );
+          }
+        }),
+
+        listGmailLabels: tool({
+          description: "List Gmail labels.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return listGmailLabels(this.ctx.storage, env);
+          }
+        }),
+
+        modifyGmailLabels: tool({
+          description: "Add or remove Gmail labels from a message.",
+          needsApproval: async () => requiresConfirmation("modify_email"),
+          inputSchema: z.object({
+            messageId: z.string(),
+            addLabelIds: z.array(z.string()).optional(),
+            removeLabelIds: z.array(z.string()).optional()
+          }),
+          execute: async ({ messageId, addLabelIds, removeLabelIds }) => {
+            const env = this.env as Env & {
+              MCP_CLIENT_ID: string;
+              MCP_CLIENT_SECRET: string;
+            };
+
+            return modifyGmailLabels(
+              this.ctx.storage,
+              env,
+              messageId,
+              addLabelIds,
+              removeLabelIds
             );
           }
         }),
@@ -805,6 +1133,13 @@ Use these memories only when they are relevant to the user's request.
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/google-gmail/callback") {
+      const id = env.ChatAgent.idFromName("default");
+      const stub = env.ChatAgent.get(id);
+
+      return await stub.handleGoogleGmailCallback(request);
+    }
 
     if (url.pathname === "/google-calendar/callback") {
       const id = env.ChatAgent.idFromName("default");

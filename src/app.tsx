@@ -282,6 +282,7 @@ function Chat() {
   const mcpPanelRef = useRef<HTMLDivElement>(null);
   const handledMcpAuthServers = useRef(new Set<string>());
   const [isConnectingCalendar, setIsConnectingCalendar] = useState(false);
+  const [isConnectingGmail, setIsConnectingGmail] = useState(false);
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
@@ -378,6 +379,25 @@ function Chat() {
       );
     } finally {
       setIsConnectingCalendar(false);
+    }
+  };
+
+  const handleConnectGmail = async () => {
+    setIsConnectingGmail(true);
+
+    try {
+      const authUrl = await agent.stub.getGoogleGmailAuthUrl();
+
+      console.log("[Gmail] OAuth:", {
+        clientId: new URL(authUrl).searchParams.get("client_id"),
+        redirectUri: new URL(authUrl).searchParams.get("redirect_uri")
+      });
+
+      window.open(authUrl, "google-gmail-oauth", "width=600,height=800");
+    } catch (error) {
+      console.error("[Gmail] Failed to get authorization URL:", error);
+    } finally {
+      setIsConnectingGmail(false);
     }
   };
 
@@ -625,6 +645,21 @@ function Chat() {
                         {isConnectingCalendar
                           ? "Connecting..."
                           : "Connect Google Calendar"}
+                      </Button>
+                    </div>
+                    <div className="space-y-2">
+                      <Text size="sm" bold>
+                        Gmail
+                      </Text>
+
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        icon={<SignInIcon size={14} />}
+                        onClick={handleConnectGmail}
+                        disabled={isConnectingGmail}
+                      >
+                        {isConnectingGmail ? "Connecting..." : "Connect Gmail"}
                       </Button>
                     </div>
                     {/* Panel Header */}
