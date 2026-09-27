@@ -6,6 +6,8 @@ export type PermissionAction =
   | "check_weather"
   | "create_reminder"
   | "create_calendar_event"
+  | "update_calendar_event"
+  | "delete_calendar_event"
   | "send_email"
   | "delete_email"
   | "financial_action"
@@ -45,8 +47,20 @@ const DEFAULT_PERMISSIONS: Record<PermissionAction, PermissionRule> = {
 
   create_calendar_event: {
     action: "create_calendar_event",
-    level: "configurable",
+    level: "confirm",
     description: "Create an event in the user's calendar"
+  },
+
+  update_calendar_event: {
+    action: "update_calendar_event",
+    level: "confirm",
+    description: "Modify an existing event in the user's calendar"
+  },
+
+  delete_calendar_event: {
+    action: "delete_calendar_event",
+    level: "confirm",
+    description: "Delete an event from the user's calendar"
   },
 
   send_email: {
@@ -90,4 +104,12 @@ export function getPermissionLevel(action: PermissionAction): PermissionLevel {
 
 export function requiresConfirmation(action: PermissionAction): boolean {
   return getPermissionLevel(action) === "confirm";
+}
+
+export function isConfigurable(action: PermissionAction): boolean {
+  return getPermissionLevel(action) === "configurable";
+}
+
+export function listPermissions(): PermissionRule[] {
+  return Object.values(DEFAULT_PERMISSIONS);
 }

@@ -379,18 +379,19 @@ MEMORY RULES:
 - Never claim that something is stored in long-term memory unless a memory tool actually returns it.
 - Never use information from the current conversation as evidence that something is stored in long-term memory.
 
-${relevantMemories.length > 0
-          ? `
+${
+  relevantMemories.length > 0
+    ? `
 RELEVANT PERSISTENT MEMORIES:
 
 ${relevantMemories
-            .map((memory) => `- [${memory.category}] ${memory.content}`)
-            .join("\n")}
+  .map((memory) => `- [${memory.category}] ${memory.content}`)
+  .join("\n")}
 
 Use these memories only when they are relevant to the user's request.
 `
-          : ""
-        }`,
+    : ""
+}`,
 
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
@@ -533,7 +534,7 @@ Use these memories only when they are relevant to the user's request.
               .describe("IANA timezone, for example Europe/Rome")
           }),
           needsApproval: async () =>
-            requiresConfirmation("create_calendar_event"),
+            requiresConfirmation("update_calendar_event"),
           execute: async ({
             eventId,
             summary,
@@ -556,19 +557,19 @@ Use these memories only when they are relevant to the user's request.
                 location,
                 ...(startTime
                   ? {
-                    start: {
-                      dateTime: startTime,
-                      timeZone
+                      start: {
+                        dateTime: startTime,
+                        timeZone
+                      }
                     }
-                  }
                   : {}),
                 ...(endTime
                   ? {
-                    end: {
-                      dateTime: endTime,
-                      timeZone
+                      end: {
+                        dateTime: endTime,
+                        timeZone
+                      }
                     }
-                  }
                   : {})
               }
             );
@@ -581,7 +582,8 @@ Use these memories only when they are relevant to the user's request.
           inputSchema: z.object({
             eventId: z.string().describe("Google Calendar event ID")
           }),
-          needsApproval: async () => true,
+          needsApproval: async () =>
+            requiresConfirmation("delete_calendar_event"),
           execute: async ({ eventId }) => {
             return deleteCalendarEvent(
               this.ctx.storage,
