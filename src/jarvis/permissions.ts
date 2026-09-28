@@ -8,20 +8,27 @@ export type PermissionAction =
   | "create_calendar_event"
   | "update_calendar_event"
   | "delete_calendar_event"
+  | "read_email"
+  | "search_email"
+  | "create_email_draft"
+  | "update_email_draft"
   | "send_email"
+  | "send_email_draft"
   | "delete_email"
+  | "delete_email_draft"
+  | "trash_email"
+  | "modify_email"
   | "financial_action"
   | "browser_action"
-  | "calculate"
-  | "send_email"
-  | "trash_email"
-  | "modify_email";
+  | "calculate";
 
 export interface PermissionRule {
   action: PermissionAction;
   level: PermissionLevel;
   description: string;
 }
+
+const PERMISSION_STORAGE_KEY = "jarvis:permissions";
 
 const DEFAULT_PERMISSIONS: Record<PermissionAction, PermissionRule> = {
   read_calendar: {
@@ -66,16 +73,64 @@ const DEFAULT_PERMISSIONS: Record<PermissionAction, PermissionRule> = {
     description: "Delete an event from the user's calendar"
   },
 
+  read_email: {
+    action: "read_email",
+    level: "auto",
+    description: "Read Gmail messages"
+  },
+
+  search_email: {
+    action: "search_email",
+    level: "auto",
+    description: "Search Gmail messages"
+  },
+
+  create_email_draft: {
+    action: "create_email_draft",
+    level: "auto",
+    description: "Create a Gmail draft"
+  },
+
+  update_email_draft: {
+    action: "update_email_draft",
+    level: "auto",
+    description: "Update a Gmail draft"
+  },
+
   send_email: {
     action: "send_email",
     level: "confirm",
-    description: "Send an email on behalf of the user"
+    description: "Send a new email"
+  },
+
+  send_email_draft: {
+    action: "send_email_draft",
+    level: "confirm",
+    description: "Send an existing Gmail draft"
   },
 
   delete_email: {
     action: "delete_email",
     level: "confirm",
     description: "Delete an email"
+  },
+
+  delete_email_draft: {
+    action: "delete_email_draft",
+    level: "confirm",
+    description: "Permanently delete an unsent Gmail draft"
+  },
+
+  trash_email: {
+    action: "trash_email",
+    level: "confirm",
+    description: "Move a Gmail message to the trash"
+  },
+
+  modify_email: {
+    action: "modify_email",
+    level: "confirm",
+    description: "Modify Gmail message state or labels"
   },
 
   financial_action: {
@@ -94,18 +149,6 @@ const DEFAULT_PERMISSIONS: Record<PermissionAction, PermissionRule> = {
     action: "calculate",
     level: "auto",
     description: "Perform a mathematical calculation"
-  },
-
-  trash_email: {
-    action: "trash_email",
-    level: "confirm",
-    description: "Move an email to the Gmail trash"
-  },
-
-  modify_email: {
-    action: "modify_email",
-    level: "configurable",
-    description: "Modify email state, labels, or read status"
   }
 };
 
@@ -113,18 +156,90 @@ export function getPermission(action: PermissionAction): PermissionRule {
   return DEFAULT_PERMISSIONS[action];
 }
 
-export function getPermissionLevel(action: PermissionAction): PermissionLevel {
-  return getPermission(action).level;
+export function getDefaultPermissions(): PermissionRule[] {
+  return Object.values(DEFAULT_PERMISSIONS);
 }
 
-export function requiresConfirmation(action: PermissionAction): boolean {
-  return getPermissionLevel(action) === "confirm";
+export async function getPermissionLevel(
+  storage: DurableObjectStorage,
+  action: PermissionAction
+): Promise<PermissionLevel> {
+  const configured = await storage.get<
+    Partial<Record<PermissionAction, PermissionLevel>>
+  >(PERMISSION_STORAGE_KEY);
+
+  return configured?.[action] ?? DEFAULT_PERMISSIONS[action].level;
 }
 
-export function isConfigurable(action: PermissionAction): boolean {
-  return getPermissionLevel(action) === "configurable";
+export async function getPermissions(
+  storage: DurableObjectStorage
+): Promise<PermissionRule[]> {
+  const configured = await storage.get<
+    Partial<Record<PermissionAction, PermissionLevel>>
+  >(PERMISSION_STORAGE_KEY);
+
+  return Object.values(DEFAULT_PERMISSIONS).map((permission) => ({
+    ...permission,
+    level: configured?.[permission.action] ?? permission.level
+  }));
+}
+
+export async function setPermission(
+  storage: DurableObjectStorage,
+  action: PermissionAction,
+  level: PermissionLevel
+): Promise<PermissionRule> {
+  const configured =
+    (await storage.get<Partial<Record<PermissionAction, PermissionLevel>>>(
+      PERMISSION_STORAGE_KEY
+    )) ?? {};
+
+  configured[action] = level;
+
+  await storage.put(PERMISSION_STORAGE_KEY, configured);
+
+  return {
+    ...DEFAULT_PERMISSIONS[action],
+    level
+  };
+}
+
+export async function resetPermission(
+  storage: DurableObjectStorage,
+  action: PermissionAction
+): Promise<PermissionRule> {
+  const configured =
+    (await storage.get<Partial<Record<PermissionAction, PermissionLevel>>>(
+      PERMISSION_STORAGE_KEY
+    )) ?? {};
+
+  delete configured[action];
+
+  await storage.put(PERMISSION_STORAGE_KEY, configured);
+
+  return DEFAULT_PERMISSIONS[action];
+}
+
+export async function requiresConfirmation(
+  storage: DurableObjectStorage,
+  action: PermissionAction
+): Promise<boolean> {
+  const level = await getPermissionLevel(storage, action);
+
+  return level === "confirm";
+}
+
+export async function isConfigurable(
+  storage: DurableObjectStorage,
+  action: PermissionAction
+): Promise<boolean> {
+  const configured = await storage.get<
+    Partial<Record<PermissionAction, PermissionLevel>>
+  >(PERMISSION_STORAGE_KEY);
+
+  return configured?.[action] === "configurable";
 }
 
 export function listPermissions(): PermissionRule[] {
-  return Object.values(DEFAULT_PERMISSIONS);
+  return getDefaultPermissions();
 }

@@ -24,7 +24,12 @@ import {
   forgetMemory,
   updateMemory
 } from "./jarvis/memory";
-import { requiresConfirmation } from "./jarvis/permissions";
+import {
+  requiresConfirmation,
+  getPermissions,
+  setPermission,
+  resetPermission
+} from "./jarvis/permissions";
 import {
   createGoogleCalendarAuthorizationUrl,
   getCalendarRedirectUri,
@@ -361,26 +366,47 @@ ${JARVIS_POLICIES}
 
 PERMISSION RULES:
 
-JARVIS has a permission system for actions.
+JARVIS has a persistent permission system for actions.
 
 - "auto": JARVIS may perform the action without asking for confirmation.
-- "configurable": the action depends on the user's configured permission.
 - "confirm": JARVIS must ask the user for confirmation before performing the action.
+- "configurable": the permission can be changed by the user and its effective level is stored persistently.
 
-Current default permissions:
+Default permissions:
 
 - read_calendar: auto
 - search_web: auto
 - check_weather: auto
 - create_reminder: auto
-- create_calendar_event: configurable
+- create_calendar_event: confirm
+- update_calendar_event: confirm
+- delete_calendar_event: confirm
+- read_email: auto
+- search_email: auto
+- create_email_draft: auto
+- update_email_draft: auto
 - send_email: confirm
+- send_email_draft: confirm
 - delete_email: confirm
+- delete_email_draft: confirm
+- trash_email: confirm
+- modify_email: confirm
 - financial_action: confirm
 - browser_action: configurable
+- calculate: auto
 
 Never bypass a required confirmation.
 Never claim an action was performed before the corresponding tool succeeds.
+When a permission is configurable, use the effective permission returned by the permission system.
+
+PERMISSION MANAGEMENT:
+
+- When the user asks what permissions JARVIS currently has, use getPermissions.
+- When the user explicitly asks to change a permission, use setPermission.
+- When the user explicitly asks to restore a permission to its default, use resetPermission.
+- Never change a permission without an explicit user request.
+- Changing a permission is itself an intentional user configuration action and does not require an additional confirmation.
+- Always describe the resulting permission level after changing it.
 
 CALENDAR DATE RULES:
 
@@ -456,6 +482,80 @@ MEMORY RULES:
               },
               eventId
             );
+          }
+        }),
+
+        getPermissions: tool({
+          description:
+            "List JARVIS permission settings and their current effective levels.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            return getPermissions(this.ctx.storage);
+          }
+        }),
+
+        setPermission: tool({
+          description:
+            "Change the persistent permission level for an action. Use only when the user explicitly asks to change a JARVIS permission.",
+          inputSchema: z.object({
+            action: z.enum([
+              "read_calendar",
+              "search_web",
+              "check_weather",
+              "create_reminder",
+              "create_calendar_event",
+              "update_calendar_event",
+              "delete_calendar_event",
+              "read_email",
+              "search_email",
+              "create_email_draft",
+              "update_email_draft",
+              "send_email",
+              "send_email_draft",
+              "delete_email",
+              "delete_email_draft",
+              "trash_email",
+              "modify_email",
+              "financial_action",
+              "browser_action",
+              "calculate"
+            ]),
+            level: z.enum(["auto", "configurable", "confirm"])
+          }),
+          execute: async ({ action, level }) => {
+            return setPermission(this.ctx.storage, action, level);
+          }
+        }),
+
+        resetPermission: tool({
+          description:
+            "Reset a permission to its default JARVIS permission level.",
+          inputSchema: z.object({
+            action: z.enum([
+              "read_calendar",
+              "search_web",
+              "check_weather",
+              "create_reminder",
+              "create_calendar_event",
+              "update_calendar_event",
+              "delete_calendar_event",
+              "read_email",
+              "search_email",
+              "create_email_draft",
+              "update_email_draft",
+              "send_email",
+              "send_email_draft",
+              "delete_email",
+              "delete_email_draft",
+              "trash_email",
+              "modify_email",
+              "financial_action",
+              "browser_action",
+              "calculate"
+            ])
+          }),
+          execute: async ({ action }) => {
+            return resetPermission(this.ctx.storage, action);
           }
         }),
 
@@ -576,7 +676,8 @@ MEMORY RULES:
 
         deleteGmailDraft: tool({
           description: "Permanently delete an unsent Gmail draft.",
-          needsApproval: async () => requiresConfirmation("trash_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "delete_email_draft"),
           inputSchema: z.object({
             draftId: z.string()
           }),
@@ -593,7 +694,8 @@ MEMORY RULES:
         sendGmail: tool({
           description:
             "Send an email through Gmail. ALWAYS requires user confirmation.",
-          needsApproval: async () => requiresConfirmation("send_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "send_email"),
           inputSchema: z.object({
             to: z.string(),
             cc: z.string().optional(),
@@ -616,7 +718,8 @@ MEMORY RULES:
         sendGmailDraft: tool({
           description:
             "Send an existing Gmail draft. ALWAYS requires user confirmation.",
-          needsApproval: async () => requiresConfirmation("send_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "send_email_draft"),
           inputSchema: z.object({
             draftId: z.string()
           }),
@@ -633,7 +736,8 @@ MEMORY RULES:
         trashGmailMessage: tool({
           description:
             "Move a Gmail message to the trash. ALWAYS requires user confirmation.",
-          needsApproval: async () => requiresConfirmation("trash_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "trash_email"),
           inputSchema: z.object({
             messageId: z.string()
           }),
@@ -649,7 +753,8 @@ MEMORY RULES:
 
         markGmailRead: tool({
           description: "Mark a Gmail message as read.",
-          needsApproval: async () => requiresConfirmation("modify_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "modify_email"),
           inputSchema: z.object({
             messageId: z.string()
           }),
@@ -671,7 +776,8 @@ MEMORY RULES:
 
         markGmailUnread: tool({
           description: "Mark a Gmail message as unread.",
-          needsApproval: async () => requiresConfirmation("modify_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "modify_email"),
           inputSchema: z.object({
             messageId: z.string()
           }),
@@ -706,7 +812,8 @@ MEMORY RULES:
 
         modifyGmailLabels: tool({
           description: "Add or remove Gmail labels from a message.",
-          needsApproval: async () => requiresConfirmation("modify_email"),
+          needsApproval: async () =>
+            requiresConfirmation(this.ctx.storage, "modify_email"),
           inputSchema: z.object({
             messageId: z.string(),
             addLabelIds: z.array(z.string()).optional(),
@@ -785,7 +892,10 @@ MEMORY RULES:
               .describe("IANA timezone, for example Europe/Rome")
           }),
           needsApproval: async () =>
-            requiresConfirmation("create_calendar_event"),
+            requiresConfirmation(
+              this.ctx.storage,
+              "create_calendar_event"
+            ),
           execute: async ({
             summary,
             description,
@@ -842,7 +952,10 @@ MEMORY RULES:
               .describe("IANA timezone, for example Europe/Rome")
           }),
           needsApproval: async () =>
-            requiresConfirmation("update_calendar_event"),
+            requiresConfirmation(
+              this.ctx.storage,
+              "update_calendar_event"
+            ),
           execute: async ({
             eventId,
             summary,
@@ -865,19 +978,19 @@ MEMORY RULES:
                 location,
                 ...(startTime
                   ? {
-                      start: {
-                        dateTime: startTime,
-                        timeZone
-                      }
+                    start: {
+                      dateTime: startTime,
+                      timeZone
                     }
+                  }
                   : {}),
                 ...(endTime
                   ? {
-                      end: {
-                        dateTime: endTime,
-                        timeZone
-                      }
+                    end: {
+                      dateTime: endTime,
+                      timeZone
                     }
+                  }
                   : {})
               }
             );
@@ -891,7 +1004,10 @@ MEMORY RULES:
             eventId: z.string().describe("Google Calendar event ID")
           }),
           needsApproval: async () =>
-            requiresConfirmation("delete_calendar_event"),
+            requiresConfirmation(
+              this.ctx.storage,
+              "delete_calendar_event"
+            ),
           execute: async ({ eventId }) => {
             return deleteCalendarEvent(
               this.ctx.storage,
@@ -977,7 +1093,7 @@ MEMORY RULES:
               .describe("Arithmetic operator")
           }),
           needsApproval: async ({ a, b }) =>
-            requiresConfirmation("calculate") ||
+            (await requiresConfirmation(this.ctx.storage, "calculate")) ||
             Math.abs(a) > 1000 ||
             Math.abs(b) > 1000,
           execute: async ({ a, b, operator }) => {
