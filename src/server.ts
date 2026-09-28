@@ -353,18 +353,6 @@ export class ChatAgent extends AIChatAgent<Env> {
 
     const messages = await convertToModelMessages(this.messages);
 
-    const lastUserMessage = [...messages]
-      .reverse()
-      .find((message) => message.role === "user");
-
-    const memoryQuery =
-      typeof lastUserMessage?.content === "string"
-        ? lastUserMessage.content.trim()
-        : "";
-
-    const relevantMemories =
-      memoryQuery.length > 3 ? searchMemories(this, memoryQuery) : [];
-
     const result = streamText({
       model: getJarvisModel(this.env, "default", this.sessionAffinity),
       system: `${JARVIS_IDENTITY}
@@ -430,24 +418,19 @@ MEMORY RULES:
 - When the user asks whether you remember a specific fact, use searchMemory.
 - When the user asks for specific information that may be stored in memory, use searchMemory.
 - When the user asks you to forget something, use forgetMemory.
+- When the user refers to "that memory", "that preference", or similar wording, first search persistent memory using concise keywords from the referenced information.
+- If a memory search returns no results, retry with simpler and more specific keywords before concluding that the memory does not exist.
+- When a matching memory is found, use its returned ID with forgetMemory or updateMemory.
+- Never claim that a memory does not exist until a reasonable memory search has been performed.
 - When the user asks to change a stored memory, use updateMemory.
+- When searching memory, prefer short concrete keywords that are likely to appear literally in the stored memory.
+- Avoid combining many abstract or semantic terms in a single search query.
+- For example, if the user asks about a coffee preference, search for "caffè" rather than "preferenze caffè".
+- If the first search returns no results, retry using one or two important concrete keywords from the user's request.
 - Only information returned by the memory tools counts as persistent memory.
 - Never claim that something is stored in long-term memory unless a memory tool actually returns it.
 - Never use information from the current conversation as evidence that something is stored in long-term memory.
-
-${
-  relevantMemories.length > 0
-    ? `
-RELEVANT PERSISTENT MEMORIES:
-
-${relevantMemories
-  .map((memory) => `- [${memory.category}] ${memory.content}`)
-  .join("\n")}
-
-Use these memories only when they are relevant to the user's request.
-`
-    : ""
-}`,
+`,
 
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
@@ -927,10 +910,18 @@ Use these memories only when they are relevant to the user's request.
           inputSchema: z.object({
             content: z.string().describe("The information to remember"),
             category: z
-              .string()
-              .default("general")
+              .enum([
+                "personal",
+                "preference",
+                "work",
+                "project",
+                "technical",
+                "routine",
+                "other"
+              ])
+              .default("other")
               .describe(
-                "Memory category, such as personal, preference, project, work, or general"
+                "Memory category: personal, preference, work, project, technical, routine, or other"
               )
           }),
           execute: async ({ content, category }) => {
@@ -1040,7 +1031,15 @@ Use these memories only when they are relevant to the user's request.
             id: z.string().describe("The ID of the memory to update"),
             content: z.string().describe("The new memory content"),
             category: z
-              .string()
+              .enum([
+                "personal",
+                "preference",
+                "work",
+                "project",
+                "technical",
+                "routine",
+                "other"
+              ])
               .optional()
               .describe("Optional new memory category")
           }),
@@ -1074,7 +1073,7 @@ Use these memories only when they are relevant to the user's request.
               this.schedule(input, "executeTask", description, {
                 idempotent: true
               });
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
+              return `Task scheduled: "${description}"(${when.type}: ${input})`;
             } catch (error) {
               return `Error scheduling task: ${error}`;
             }

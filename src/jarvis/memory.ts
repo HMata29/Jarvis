@@ -1,7 +1,19 @@
+export type MemoryCategory =
+  | "personal"
+  | "preference"
+  | "work"
+  | "project"
+  | "technical"
+  | "routine"
+  | "other";
+
+export type MemorySource = "explicit";
+
 export interface MemoryRecord {
   id: string;
   content: string;
-  category: string;
+  category: MemoryCategory;
+  source: MemorySource;
   created_at: string;
   updated_at: string;
 }
@@ -18,7 +30,8 @@ function ensureTable(agent: SqlAgent) {
     CREATE TABLE IF NOT EXISTS jarvis_memories (
       id TEXT PRIMARY KEY,
       content TEXT NOT NULL,
-      category TEXT NOT NULL DEFAULT 'general',
+      category TEXT NOT NULL DEFAULT 'other',
+      source TEXT NOT NULL DEFAULT 'explicit',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
@@ -28,7 +41,7 @@ function ensureTable(agent: SqlAgent) {
 export function rememberMemory(
   agent: SqlAgent,
   content: string,
-  category = "general"
+  category: MemoryCategory = "other"
 ): MemoryRecord {
   ensureTable(agent);
 
@@ -38,12 +51,14 @@ export function rememberMemory(
     INSERT INTO jarvis_memories (
       id,
       content,
-      category
+      category,
+      source
     )
     VALUES (
       ${id},
       ${content},
-      ${category}
+      ${category},
+      'explicit'
     )
   `;
 
@@ -69,16 +84,38 @@ export function listMemories(agent: SqlAgent): MemoryRecord[] {
 export function searchMemories(agent: SqlAgent, query: string): MemoryRecord[] {
   ensureTable(agent);
 
-  const search = `%${query}%`;
+  const terms = query
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.replace(/[%_]/g, ""))
+    .filter(Boolean);
 
-  return agent.sql<MemoryRecord>`
-    SELECT *
-    FROM jarvis_memories
-    WHERE content LIKE ${search}
-       OR category LIKE ${search}
-    ORDER BY updated_at DESC
-    LIMIT 10
-  `;
+  if (terms.length === 0) {
+    return [];
+  }
+
+  const results: MemoryRecord[] = [];
+
+  for (const term of terms) {
+    const search = `%${term}%`;
+
+    const rows = agent.sql<MemoryRecord>`
+      SELECT *
+      FROM jarvis_memories
+      WHERE content LIKE ${search}
+         OR category LIKE ${search}
+      ORDER BY updated_at DESC
+      LIMIT 10
+    `;
+
+    for (const row of rows) {
+      if (!results.some((existing) => existing.id === row.id)) {
+        results.push(row);
+      }
+    }
+  }
+
+  return results.slice(0, 10);
 }
 
 export function forgetMemory(agent: SqlAgent, id: string): boolean {
@@ -106,8 +143,8 @@ export function updateMemory(
   agent: SqlAgent,
   id: string,
   content: string,
-  category?: string
-): boolean {
+  category?: MemoryCategory
+): MemoryRecord | null {
   ensureTable(agent);
 
   const existing = agent.sql<{ id: string }>`
@@ -117,7 +154,7 @@ export function updateMemory(
   `;
 
   if (existing.length === 0) {
-    return false;
+    return null;
   }
 
   if (category !== undefined) {
@@ -139,5 +176,11 @@ export function updateMemory(
     `;
   }
 
-  return true;
+  const rows = agent.sql<MemoryRecord>`
+    SELECT *
+    FROM jarvis_memories
+    WHERE id = ${id}
+  `;
+
+  return rows[0] ?? null;
 }
