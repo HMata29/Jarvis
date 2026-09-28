@@ -31,6 +31,16 @@ import {
   resetPermission
 } from "./jarvis/permissions";
 import {
+  createTask,
+  getTask,
+  listTasks,
+  attachScheduleToTask,
+  markTaskRunning,
+  markTaskCompleted,
+  markTaskFailed,
+  cancelTask
+} from "./jarvis/tasks";
+import {
   createGoogleCalendarAuthorizationUrl,
   getCalendarRedirectUri,
   handleGoogleCalendarCallback,
@@ -378,6 +388,7 @@ Default permissions:
 - search_web: auto
 - check_weather: auto
 - create_reminder: auto
+- task_management: auto
 - create_calendar_event: confirm
 - update_calendar_event: confirm
 - delete_calendar_event: confirm
@@ -429,8 +440,23 @@ EMAIL RULES:
 - Never permanently delete Gmail messages.
 Never claim that an email was sent, moved to trash, or modified until the corresponding Gmail tool succeeds.
 
-You can understand images. You can check the weather, get the user's timezone,
-run calculations, manage persistent memory, and schedule tasks.
+You can understand images, check the weather, get the user's timezone,
+run calculations, manage persistent memory, and manage persistent scheduled tasks.
+
+${getSchedulePrompt({ date: new Date() })}
+
+TASK RULES:
+
+- When the user asks to do something later or be reminded, use scheduleTask.
+- Scheduled tasks are persistent JARVIS tasks.
+- Use getTask when the user asks about a specific task.
+- Use getScheduledTasks when the user asks about their scheduled or existing tasks.
+- Use cancelScheduledTask when the user explicitly asks to cancel a task.
+- Never claim that a scheduled task completed unless the task execution system reports completion.
+- A recurring task remains pending after each successful execution.
+- A one-time task becomes completed after successful execution.
+- Task execution must never bypass the permission system.
+- Background execution of external actions such as sending emails, modifying calendar events, financial actions, or browser actions is not supported yet unless an explicit execution tool exists.
 
 ${getSchedulePrompt({ date: new Date() })}
 
@@ -892,10 +918,7 @@ MEMORY RULES:
               .describe("IANA timezone, for example Europe/Rome")
           }),
           needsApproval: async () =>
-            requiresConfirmation(
-              this.ctx.storage,
-              "create_calendar_event"
-            ),
+            requiresConfirmation(this.ctx.storage, "create_calendar_event"),
           execute: async ({
             summary,
             description,
@@ -952,10 +975,7 @@ MEMORY RULES:
               .describe("IANA timezone, for example Europe/Rome")
           }),
           needsApproval: async () =>
-            requiresConfirmation(
-              this.ctx.storage,
-              "update_calendar_event"
-            ),
+            requiresConfirmation(this.ctx.storage, "update_calendar_event"),
           execute: async ({
             eventId,
             summary,
@@ -978,19 +998,19 @@ MEMORY RULES:
                 location,
                 ...(startTime
                   ? {
-                    start: {
-                      dateTime: startTime,
-                      timeZone
+                      start: {
+                        dateTime: startTime,
+                        timeZone
+                      }
                     }
-                  }
                   : {}),
                 ...(endTime
                   ? {
-                    end: {
-                      dateTime: endTime,
-                      timeZone
+                      end: {
+                        dateTime: endTime,
+                        timeZone
+                      }
                     }
-                  }
                   : {})
               }
             );
@@ -1004,10 +1024,7 @@ MEMORY RULES:
             eventId: z.string().describe("Google Calendar event ID")
           }),
           needsApproval: async () =>
-            requiresConfirmation(
-              this.ctx.storage,
-              "delete_calendar_event"
-            ),
+            requiresConfirmation(this.ctx.storage, "delete_calendar_event"),
           execute: async ({ eventId }) => {
             return deleteCalendarEvent(
               this.ctx.storage,
@@ -1170,13 +1187,14 @@ MEMORY RULES:
 
         scheduleTask: tool({
           description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
+            "Create a persistent JARVIS task that will be triggered at a later time. Use this when the user asks to be reminded or wants something done later.",
           inputSchema: scheduleSchema,
           execute: async ({ when, description }) => {
             if (when.type === "no-schedule") {
               return "Not a valid schedule input";
             }
-            const input =
+
+            const scheduleInput =
               when.type === "scheduled"
                 ? when.date
                 : when.type === "delayed"
@@ -1184,38 +1202,126 @@ MEMORY RULES:
                   : when.type === "cron"
                     ? when.cron
                     : null;
-            if (!input) return "Invalid schedule type";
+
+            if (!scheduleInput) {
+              return "Invalid schedule type";
+            }
+
+            const task = createTask(this, {
+              description,
+              scheduleType: when.type,
+              scheduleInput,
+              recurring: when.type === "cron"
+            });
+
+            const payload = JSON.stringify({
+              taskId: task.id
+            });
+
             try {
-              this.schedule(input, "executeTask", description, {
-                idempotent: true
-              });
-              return `Task scheduled: "${description}"(${when.type}: ${input})`;
+              const scheduleId = await this.schedule(
+                scheduleInput,
+                "executeTask",
+                payload,
+                {
+                  idempotent: true
+                }
+              );
+
+              const updatedTask = attachScheduleToTask(
+                this,
+                task.id,
+                String(scheduleId)
+              );
+
+              return {
+                success: true,
+                task: updatedTask
+              };
             } catch (error) {
-              return `Error scheduling task: ${error}`;
+              markTaskFailed(
+                this,
+                task.id,
+                error instanceof Error ? error.message : String(error)
+              );
+
+              return {
+                success: false,
+                taskId: task.id,
+                error: error instanceof Error ? error.message : String(error)
+              };
             }
           }
         }),
 
+        getTask: tool({
+          description: "Get the current state of a specific JARVIS task.",
+          inputSchema: z.object({
+            taskId: z.string().describe("The JARVIS task ID")
+          }),
+          execute: async ({ taskId }) => {
+            const task = getTask(this, taskId);
+
+            return (
+              task ?? {
+                error: `Task ${taskId} not found.`
+              }
+            );
+          }
+        }),
+
         getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
+          description: "List JARVIS tasks and their current status.",
+          inputSchema: z.object({
+            status: z
+              .enum(["pending", "running", "completed", "failed", "cancelled"])
+              .optional()
+              .describe("Optional task status filter")
+          }),
+          execute: async ({ status }) => {
+            return listTasks(this, status);
           }
         }),
 
         cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
+          description: "Cancel a pending JARVIS scheduled task.",
           inputSchema: z.object({
-            taskId: z.string().describe("The ID of the task to cancel")
+            taskId: z.string().describe("The JARVIS task ID")
           }),
           execute: async ({ taskId }) => {
+            const task = getTask(this, taskId);
+
+            if (!task) {
+              return {
+                success: false,
+                error: `Task ${taskId} not found.`
+              };
+            }
+
+            if (task.status === "completed") {
+              return {
+                success: false,
+                error: "Completed tasks cannot be cancelled."
+              };
+            }
+
             try {
-              this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
+              if (task.scheduleId) {
+                await this.cancelSchedule(task.scheduleId);
+              }
+
+              const cancelled = cancelTask(this, taskId);
+
+              return {
+                success: true,
+                task: cancelled
+              };
             } catch (error) {
-              return `Error cancelling task: ${error}`;
+              return {
+                success: false,
+                taskId,
+                error: error instanceof Error ? error.message : String(error)
+              };
             }
           }
         })
@@ -1227,21 +1333,89 @@ MEMORY RULES:
     return result.toUIMessageStreamResponse();
   }
 
-  async executeTask(description: string, _task: Schedule<string>) {
-    // Do the actual work here (send email, call API, etc.)
-    console.log(`Executing scheduled task: ${description}`);
+  async executeTask(payload: string, _task: Schedule<string>) {
+    let taskId: string;
 
-    // Notify connected clients via a broadcast event.
-    // We use broadcast() instead of saveMessages() to avoid injecting
-    // into chat history — that would cause the AI to see the notification
-    // as new context and potentially loop.
-    this.broadcast(
-      JSON.stringify({
-        type: "scheduled-task",
-        description,
-        timestamp: new Date().toISOString()
-      })
-    );
+    try {
+      const parsed = JSON.parse(payload) as {
+        taskId?: string;
+      };
+
+      if (!parsed.taskId) {
+        throw new Error("Scheduled task payload does not contain a taskId.");
+      }
+
+      taskId = parsed.taskId;
+    } catch (error) {
+      console.error("[TASK] Invalid scheduled task payload", error);
+
+      return;
+    }
+
+    const task = getTask(this, taskId);
+
+    if (!task) {
+      console.error(`[TASK] Task ${taskId} not found`);
+
+      return;
+    }
+
+    if (task.status === "cancelled") {
+      console.log(`[TASK] Task ${taskId} was cancelled. Skipping execution.`);
+
+      return;
+    }
+
+    if (task.status === "completed" && !task.recurring) {
+      console.log(
+        `[TASK] Task ${taskId} already completed. Skipping execution.`
+      );
+
+      return;
+    }
+
+    try {
+      markTaskRunning(this, taskId);
+
+      console.log(`[TASK] Executing task ${taskId}: ${task.description}`);
+
+      /*
+       * Task Engine 1.0 intentionally handles task lifecycle and
+       * scheduled notifications only.
+       *
+       * Arbitrary background actions such as sending emails,
+       * modifying calendar events, browser actions, etc. will be
+       * implemented in a later execution engine that re-checks
+       * permissions at execution time.
+       */
+
+      const completed = markTaskCompleted(this, taskId);
+
+      this.broadcast(
+        JSON.stringify({
+          type: "scheduled-task",
+          task: completed,
+          timestamp: new Date().toISOString()
+        })
+      );
+
+      console.log(`[TASK] Task ${taskId} completed successfully`);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      const failed = markTaskFailed(this, taskId, errorMessage);
+
+      this.broadcast(
+        JSON.stringify({
+          type: "scheduled-task-failed",
+          task: failed,
+          timestamp: new Date().toISOString()
+        })
+      );
+
+      console.error(`[TASK] Task ${taskId} failed`, error);
+    }
   }
 }
 
