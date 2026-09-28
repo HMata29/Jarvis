@@ -448,6 +448,27 @@ ${getSchedulePrompt({ date: new Date() })}
 TASK RULES:
 
 - When the user asks to do something later or be reminded, use scheduleTask.
+- When a scheduled task requires an actual action, always provide the corresponding action to scheduleTask.
+- For Gmail tasks that search for emails, use action type "search_email" and include the Gmail search query in action.input.query.
+- For Gmail tasks that read a specific email, use action type "get_email" and include the Gmail message ID in action.input.messageId.
+- For example, "controlla Gmail e dimmi se ho ricevuto nuove email" should create a search_email action with a suitable Gmail query.
+- For example, "leggi questa email" should use get_email with the specific messageId.
+- Do not create an actionless task when the user explicitly asks JARVIS to perform an action at the scheduled time.
+- For Gmail tasks that need to read a specific email, use action type "get_email" and include the Gmail message ID in action.input.messageId.
+- Use "search_email" first when the user asks to find emails.
+- Use "get_email" when the user asks to open, read, summarize, or inspect a specific email returned by a Gmail search.
+- When the user asks to search for emails and then read the first matching email, use action type "search_email" with action.input.readFirst set to true.
+- When readFirst is true, the task executor will automatically read the first matching email after the search.
+
+A scheduled task contains both:
+- the schedule: when it runs
+- the action: what JARVIS must execute when it runs
+
+Never confuse a reminder notification with execution of the requested action.
+- For a "scheduled" task at a specific clock time, first use getUserTimezone when the user's timezone is not already known.
+- The scheduled date passed to scheduleTask MUST be an ISO 8601 datetime with an explicit timezone offset, such as 2026-09-28T19:41:00+02:00.
+- Never pass "today at 19:41", "tomorrow at 09:00", or a datetime without a timezone such as "2026-09-28 19:41" to scheduleTask.
+- Interpret the user's requested clock time in the user's local timezone.
 - Scheduled tasks are persistent JARVIS tasks.
 - Use getTask when the user asks about a specific task.
 - Use getScheduledTasks when the user asks about their scheduled or existing tasks.
@@ -456,9 +477,11 @@ TASK RULES:
 - A recurring task remains pending after each successful execution.
 - A one-time task becomes completed after successful execution.
 - Task execution must never bypass the permission system.
-- Background execution of external actions such as sending emails, modifying calendar events, financial actions, or browser actions is not supported yet unless an explicit execution tool exists.
-
-${getSchedulePrompt({ date: new Date() })}
+- Background execution is supported only for explicitly implemented task actions.
+- Currently supported background actions are search_email and get_email.
+- Background execution must never bypass the permission system.
+- Actions requiring interactive confirmation cannot be executed in the background.
+- Sending emails, modifying calendar events, financial actions, and browser actions are not supported as background task actions yet.
 
 When the user asks to schedule a task, use the schedule tool.
 
@@ -1187,9 +1210,23 @@ MEMORY RULES:
 
         scheduleTask: tool({
           description:
-            "Create a persistent JARVIS task that will be triggered at a later time. Use this when the user asks to be reminded or wants something done later.",
-          inputSchema: scheduleSchema,
-          execute: async ({ when, description }) => {
+            "Create a persistent JARVIS task that will be triggered at a later time. Use this when the user asks to be reminded or wants something done later. For tasks that must actually perform an action when triggered, always include the action. Supported actions: search_email, get_email, read_calendar, check_weather. For a scheduled task at a specific clock time, the date MUST be an ISO 8601 datetime with an explicit timezone offset, for example 2026-09-28T19:41:00+02:00. Before creating a scheduled task, use getUserTimezone if the user's timezone is not already known. Never pass natural-language dates such as 'today at 19:41' or timezone-less dates such as '2026-09-28 19:41'.",
+          inputSchema: z.intersection(
+            scheduleSchema,
+            z.object({
+              action: z.object({
+                type: z.enum([
+                  "none",
+                  "search_email",
+                  "get_email",
+                  "read_calendar",
+                  "check_weather"
+                ]),
+                input: z.record(z.string(), z.unknown()).optional()
+              })
+            })
+          ),
+          execute: async ({ when, description, action }) => {
             if (when.type === "no-schedule") {
               return "Not a valid schedule input";
             }
@@ -1207,8 +1244,12 @@ MEMORY RULES:
               return "Invalid schedule type";
             }
 
+            const runtimeScheduleInput =
+              when.type === "scheduled" ? new Date(when.date) : scheduleInput;
+
             const task = createTask(this, {
               description,
+              action,
               scheduleType: when.type,
               scheduleInput,
               recurring: when.type === "cron"
@@ -1220,7 +1261,7 @@ MEMORY RULES:
 
             try {
               const scheduleId = await this.schedule(
-                scheduleInput,
+                runtimeScheduleInput,
                 "executeTask",
                 payload,
                 {
@@ -1231,7 +1272,7 @@ MEMORY RULES:
               const updatedTask = attachScheduleToTask(
                 this,
                 task.id,
-                String(scheduleId)
+                scheduleId.id
               );
 
               return {
@@ -1348,7 +1389,6 @@ MEMORY RULES:
       taskId = parsed.taskId;
     } catch (error) {
       console.error("[TASK] Invalid scheduled task payload", error);
-
       return;
     }
 
@@ -1356,13 +1396,11 @@ MEMORY RULES:
 
     if (!task) {
       console.error(`[TASK] Task ${taskId} not found`);
-
       return;
     }
 
     if (task.status === "cancelled") {
       console.log(`[TASK] Task ${taskId} was cancelled. Skipping execution.`);
-
       return;
     }
 
@@ -1370,31 +1408,157 @@ MEMORY RULES:
       console.log(
         `[TASK] Task ${taskId} already completed. Skipping execution.`
       );
-
       return;
     }
 
     try {
-      markTaskRunning(this, taskId);
+      const running = markTaskRunning(this, taskId);
+
+      if (!running) {
+        throw new Error(`Unable to mark task ${taskId} as running.`);
+      }
 
       console.log(`[TASK] Executing task ${taskId}: ${task.description}`);
+      console.log("[TASK] Action:", JSON.stringify(task.action));
 
-      /*
-       * Task Engine 1.0 intentionally handles task lifecycle and
-       * scheduled notifications only.
-       *
-       * Arbitrary background actions such as sending emails,
-       * modifying calendar events, browser actions, etc. will be
-       * implemented in a later execution engine that re-checks
-       * permissions at execution time.
-       */
+      let actionResult: unknown = null;
 
-      const completed = markTaskCompleted(this, taskId);
+      switch (task.action.type) {
+        case "none":
+          console.log(`[TASK] Task ${taskId} has no action.`);
+          break;
+
+        case "search_email": {
+          if (await requiresConfirmation(this.ctx.storage, "search_email")) {
+            throw new Error(
+              "Task requires confirmation for search_email, but background execution cannot request interactive confirmation."
+            );
+          }
+
+          const query =
+            typeof task.action.input?.query === "string"
+              ? task.action.input.query
+              : "";
+
+          if (!query) {
+            throw new Error("search_email task is missing action.input.query.");
+          }
+
+          const maxResults =
+            typeof task.action.input?.maxResults === "number"
+              ? task.action.input.maxResults
+              : 20;
+
+          const readFirst = task.action.input?.readFirst === true;
+
+          console.log(`[TASK] Searching Gmail for task ${taskId}: ${query}`);
+
+          const env = this.env as Env & {
+            MCP_CLIENT_ID: string;
+            MCP_CLIENT_SECRET: string;
+          };
+
+          const searchResult = await searchGmailMessages(
+            this.ctx.storage,
+            env,
+            query,
+            maxResults
+          );
+
+          const searchActionResult = {
+            query,
+            count: searchResult.messages.length,
+            resultSizeEstimate: searchResult.resultSizeEstimate,
+            messages: searchResult.messages
+          };
+
+          actionResult = searchActionResult;
+
+          if (readFirst && searchResult.messages.length > 0) {
+            const firstMessageId = searchResult.messages[0].id;
+
+            console.log(
+              `[TASK] Reading first Gmail result for task ${taskId}: ${firstMessageId}`
+            );
+
+            if (await requiresConfirmation(this.ctx.storage, "read_email")) {
+              throw new Error(
+                "Task requires confirmation for read_email, but background execution cannot request interactive confirmation."
+              );
+            }
+
+            const firstMessage = await getGmailMessage(
+              this.ctx.storage,
+              env,
+              firstMessageId
+            );
+
+            actionResult = {
+              ...searchActionResult,
+              firstEmail: firstMessage
+            };
+
+            console.log(
+              `[TASK] First Gmail message read successfully for task ${taskId}`
+            );
+          }
+
+          console.log(
+            `[TASK] Gmail search completed for task ${taskId}: ${searchResult.messages.length} messages returned, estimate ${searchResult.resultSizeEstimate ?? "unknown"}`
+          );
+
+          break;
+        }
+
+        case "get_email": {
+          if (await requiresConfirmation(this.ctx.storage, "read_email")) {
+            throw new Error(
+              "Task requires confirmation for read_email, but background execution cannot request interactive confirmation."
+            );
+          }
+
+          const messageId =
+            typeof task.action.input?.messageId === "string"
+              ? task.action.input.messageId
+              : "";
+
+          if (!messageId) {
+            throw new Error(
+              "get_email task is missing action.input.messageId."
+            );
+          }
+
+          console.log(
+            `[TASK] Reading Gmail message for task ${taskId}: ${messageId}`
+          );
+
+          const env = this.env as Env & {
+            MCP_CLIENT_ID: string;
+            MCP_CLIENT_SECRET: string;
+          };
+
+          actionResult = await getGmailMessage(
+            this.ctx.storage,
+            env,
+            messageId
+          );
+
+          console.log(`[TASK] Gmail message read completed for task ${taskId}`);
+
+          break;
+        }
+
+        default:
+          throw new Error(`Unsupported task action: ${task.action.type}`);
+      }
+
+      const completed = markTaskCompleted(this, taskId, actionResult);
 
       this.broadcast(
         JSON.stringify({
           type: "scheduled-task",
           task: completed,
+          actionResult,
           timestamp: new Date().toISOString()
         })
       );
@@ -1410,6 +1574,7 @@ MEMORY RULES:
         JSON.stringify({
           type: "scheduled-task-failed",
           task: failed,
+          error: errorMessage,
           timestamp: new Date().toISOString()
         })
       );

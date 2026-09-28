@@ -300,9 +300,81 @@ function Chat() {
         try {
           const data = JSON.parse(String(message.data));
           if (data.type === "scheduled-task") {
+            let description =
+              data.task?.description ??
+              "La task programmata è stata completata.";
+
+            if (
+              data.task?.action?.type === "search_email" &&
+              data.actionResult
+            ) {
+              const result = data.actionResult as {
+                messages?: Array<{
+                  id?: string;
+                  threadId?: string;
+                }>;
+                resultSizeEstimate?: number;
+                firstEmail?: Record<string, unknown>;
+              };
+
+              const count = Array.isArray(result.messages)
+                ? result.messages.length
+                : 0;
+
+              if (count === 0) {
+                description = "Non hai email non lette.";
+              } else {
+                description = `Ho trovato ${count} email non lette.`;
+
+                if (result.firstEmail) {
+                  const email = result.firstEmail;
+
+                  const from =
+                    typeof email.from === "string"
+                      ? email.from
+                      : typeof email.sender === "string"
+                        ? email.sender
+                        : "Mittente sconosciuto";
+
+                  const subject =
+                    typeof email.subject === "string"
+                      ? email.subject
+                      : "Senza oggetto";
+
+                  const content =
+                    typeof email.body === "string"
+                      ? email.body
+                      : typeof email.content === "string"
+                        ? email.content
+                        : typeof email.text === "string"
+                          ? email.text
+                          : typeof email.snippet === "string"
+                            ? email.snippet
+                            : "Contenuto non disponibile.";
+
+                  description =
+                    `Ho trovato ${count} email non lette.\n\n` +
+                    `📧 Da: ${from}\n` +
+                    `Oggetto: ${subject}\n\n` +
+                    `Contenuto:\n${content}`;
+                }
+              }
+            }
+
             toasts.add({
-              title: "Scheduled task completed",
-              description: data.description,
+              title: "Task completata",
+              description,
+              timeout: 0
+            });
+          }
+
+          if (data.type === "scheduled-task-failed") {
+            toasts.add({
+              title: "Task fallita",
+              description:
+                data.error ??
+                data.task?.error ??
+                "La task non è stata completata.",
               timeout: 0
             });
           }

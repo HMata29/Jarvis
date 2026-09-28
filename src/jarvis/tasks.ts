@@ -7,9 +7,22 @@ export type TaskStatus =
 
 export type TaskScheduleType = "scheduled" | "delayed" | "cron";
 
+export type TaskActionType =
+  | "none"
+  | "search_email"
+  | "get_email"
+  | "read_calendar"
+  | "check_weather";
+
+export interface TaskAction {
+  type: TaskActionType;
+  input?: Record<string, unknown>;
+}
+
 export interface TaskRecord {
   id: string;
   description: string;
+  action: TaskAction;
   status: TaskStatus;
   scheduleType: TaskScheduleType;
   scheduleInput: string | number;
@@ -19,6 +32,7 @@ export interface TaskRecord {
   updatedAt: string;
   executedAt?: string;
   error?: string;
+  result?: unknown;
 }
 
 interface SqlAgent {
@@ -33,6 +47,8 @@ function ensureTable(agent: SqlAgent) {
     CREATE TABLE IF NOT EXISTS jarvis_tasks (
       id TEXT PRIMARY KEY,
       description TEXT NOT NULL,
+      action_type TEXT NOT NULL DEFAULT 'none',
+      action_input TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
       schedule_type TEXT NOT NULL,
       schedule_input TEXT NOT NULL,
@@ -41,15 +57,67 @@ function ensureTable(agent: SqlAgent) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       executed_at DATETIME,
-      error TEXT
+      error TEXT,
+      result_json TEXT
     )
   `;
+
+  const columns = agent.sql<{ name: string }>`
+    PRAGMA table_info(jarvis_tasks)
+  `;
+
+  if (!columns.some((column) => column.name === "action_type")) {
+    agent.sql`
+      ALTER TABLE jarvis_tasks
+      ADD COLUMN action_type TEXT NOT NULL DEFAULT 'none'
+    `;
+  }
+
+  if (!columns.some((column) => column.name === "action_input")) {
+    agent.sql`
+      ALTER TABLE jarvis_tasks
+      ADD COLUMN action_input TEXT
+    `;
+  }
+
+  if (!columns.some((column) => column.name === "result_json")) {
+    agent.sql`
+      ALTER TABLE jarvis_tasks
+      ADD COLUMN result_json TEXT
+    `;
+  }
 }
 
 function toTaskRecord(row: Record<string, unknown>): TaskRecord {
+  let actionInput: Record<string, unknown> | undefined;
+  let result: unknown;
+
+  if (row.action_input) {
+    try {
+      actionInput = JSON.parse(String(row.action_input)) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      actionInput = undefined;
+    }
+  }
+
+  if (row.result_json !== null && row.result_json !== undefined) {
+    try {
+      result = JSON.parse(String(row.result_json));
+    } catch {
+      result = undefined;
+    }
+  }
+
   return {
     id: String(row.id),
     description: String(row.description),
+    action: {
+      type: (row.action_type ?? "none") as TaskActionType,
+      ...(actionInput ? { input: actionInput } : {})
+    },
     status: row.status as TaskStatus,
     scheduleType: row.schedule_type as TaskScheduleType,
     scheduleInput:
@@ -61,7 +129,8 @@ function toTaskRecord(row: Record<string, unknown>): TaskRecord {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     ...(row.executed_at ? { executedAt: String(row.executed_at) } : {}),
-    ...(row.error ? { error: String(row.error) } : {})
+    ...(row.error ? { error: String(row.error) } : {}),
+    ...(result !== undefined ? { result } : {})
   };
 }
 
@@ -69,6 +138,7 @@ export function createTask(
   agent: SqlAgent,
   input: {
     description: string;
+    action?: TaskAction;
     scheduleType: TaskScheduleType;
     scheduleInput: string | number;
     recurring?: boolean;
@@ -82,6 +152,8 @@ export function createTask(
     INSERT INTO jarvis_tasks (
       id,
       description,
+      action_type,
+      action_input,
       status,
       schedule_type,
       schedule_input,
@@ -90,6 +162,8 @@ export function createTask(
     VALUES (
       ${id},
       ${input.description},
+      ${input.action?.type ?? "none"},
+      ${input.action?.input ? JSON.stringify(input.action.input) : null},
       'pending',
       ${input.scheduleType},
       ${String(input.scheduleInput)},
@@ -184,7 +258,8 @@ export function markTaskRunning(
 
 export function markTaskCompleted(
   agent: SqlAgent,
-  id: string
+  id: string,
+  result?: unknown
 ): TaskRecord | null {
   ensureTable(agent);
 
@@ -194,6 +269,8 @@ export function markTaskCompleted(
     return null;
   }
 
+  const serializedResult = result === undefined ? null : JSON.stringify(result);
+
   if (existing.recurring) {
     agent.sql`
       UPDATE jarvis_tasks
@@ -201,7 +278,8 @@ export function markTaskCompleted(
         status = 'pending',
         updated_at = CURRENT_TIMESTAMP,
         executed_at = CURRENT_TIMESTAMP,
-        error = NULL
+        error = NULL,
+        result_json = ${serializedResult}
       WHERE id = ${id}
     `;
   } else {
@@ -211,7 +289,8 @@ export function markTaskCompleted(
         status = 'completed',
         updated_at = CURRENT_TIMESTAMP,
         executed_at = CURRENT_TIMESTAMP,
-        error = NULL
+        error = NULL,
+        result_json = ${serializedResult}
       WHERE id = ${id}
     `;
   }
